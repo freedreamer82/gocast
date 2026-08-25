@@ -60,21 +60,42 @@ cable allows.
 
 ## Requirements
 
-**On the PC**
+### On the PC — Ubuntu / Debian
 
-| | |
-|---|---|
-| GNOME on Wayland | screen capture goes through `xdg-desktop-portal` |
-| GStreamer | `gstreamer1.0-plugins-{base,good,bad}`, `gstreamer1.0-pipewire`, `gstreamer1.0-libav` |
-| Go 1.21+ | to build |
+```console
+$ sudo apt install golang-go \
+    gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
+    gstreamer1.0-pipewire
+```
 
-**On the receiver**
+`plugins-ugly` is not optional despite the name: **`x264enc` lives there**, and
+without it nothing gets encoded. `gstreamer1.0-pipewire` provides `pipewiresrc`,
+which is the only way to capture the screen under Wayland, and `libav` provides
+the AAC encoder for the audio.
 
-| | |
-|---|---|
-| Raspberry Pi OS **Bookworm or newer** | Bullseye ships GStreamer 1.18, whose V4L2 decoder does not work — see [Known traps](#known-traps) |
-| GStreamer 1.22+ | `gstreamer1.0-plugins-{base,good,bad}`, `gstreamer1.0-alsa`, `gstreamer1.0-libav` |
-| A console session | no desktop: the compositor would own the display |
+You also need **GNOME on Wayland** — capture goes through
+`xdg-desktop-portal` — and **Go 1.21+** to build.
+
+### On the receiver — Raspberry Pi OS
+
+```console
+$ sudo apt install \
+    gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-alsa
+```
+
+`plugins-bad` provides `kmssink`, which draws straight onto the HDMI output;
+`gstreamer1.0-alsa` provides `alsasink` and is a separate package on Debian 13,
+while on Debian 11 the same element sits inside `plugins-base`. No encoder is
+needed here, so `plugins-ugly` can be left out.
+
+Two further requirements, and both have bitten:
+
+- **Bookworm or newer.** Bullseye ships GStreamer 1.18, whose V4L2 decoder does
+  not work at all — see [Known traps](#known-traps).
+- **A console session, no desktop.** A running compositor owns the display and
+  `kmssink` cannot take it.
 
 ## Build
 
