@@ -351,6 +351,20 @@ distorts the picture to fill the frame. The caps are normalised with `capssetter
 first — and the format has to be forced *before* the label is rewritten, or
 `capssetter` declares I420 over BGRA data and corrupts the image.
 
+**The HDMI card often accepts only S/PDIF subframes.** On a Raspberry the
+vc4hdmi device refuses plain `S16_LE` and takes `IEC958_SUBFRAME_LE` alone —
+and `plughw` does not bridge that gap, because wrapping samples into IEC958 is
+the job of the `hdmi:` device:
+
+```
+plughw:0,0                 Sample format non available
+hdmi:CARD=vc4hdmi,DEV=0    plays
+```
+
+A receiver that names one shape of device and gives up when it fails stays mute
+in front of a television that works perfectly. gocast builds the candidates from
+the card names and tries each one.
+
 **Testing with `videotestsrc` reproduces none of this.** It always has a
 framerate, clean caps and content that compresses to nothing. Every fault above
 passed the bench and failed on the real source. An honest bench strips the

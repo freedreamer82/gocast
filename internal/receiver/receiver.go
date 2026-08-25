@@ -384,16 +384,23 @@ func resolveAudioOut(enabled bool, dev string) string {
 		log.Print("audio: disabled on the command line")
 		return ""
 	}
-	if dev == "" {
-		dev = hdmiALSADevice()
+	if dev != "" {
+		// A device named by hand is still probed: an alsasink that cannot open
+		// takes the whole pipeline down, video included, and a typo in a device
+		// name would otherwise cost the picture rather than just the sound.
+		if !probeALSA(dev) {
+			log.Printf("audio: %s does not accept S16LE/48000/2ch, carrying on without audio", dev)
+			return ""
+		}
+		log.Printf("audio: %s", dev)
+		return dev
 	}
+
+	dev = hdmiALSADevice()
 	if dev == "" {
-		log.Print("audio: no HDMI card in `aplay -l`, carrying on without audio")
-		return ""
-	}
-	if !probeALSA(dev) {
-		log.Printf("audio: %s does not accept S16LE/48000/2ch — the display probably "+
-			"does not advertise audio support in its EDID. Carrying on without audio.", dev)
+		log.Print("audio: no usable HDMI device, carrying on without audio")
+		log.Print("audio: if the TV does have speakers, check whether the display " +
+			"advertises audio at all — /proc/asound/card*/eld* is empty when it does not")
 		return ""
 	}
 	log.Printf("audio: %s", dev)
