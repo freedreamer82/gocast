@@ -7,6 +7,7 @@ import (
 	"gocast/internal/control"
 	"gocast/internal/discovery"
 	"gocast/internal/media"
+	"gocast/internal/version"
 	"io"
 	"log"
 	"os"
@@ -244,6 +245,8 @@ func Serve(ctx context.Context, args []string) error {
 	}
 	*audioDev = resolveAudioOut(*audio, *audioDev)
 
+	log.Printf("gocast %s", version.String())
+
 	id, err := control.ReceiverID()
 	if err != nil {
 		// Without an identity we carry on: pairing will fall back to the address,
@@ -274,7 +277,10 @@ func Serve(ctx context.Context, args []string) error {
 		log.Printf("declaring a maximum width of %d", *maxWidth)
 	}
 
-	srv, err := discovery.Announce(*name, *port, *pairing, id, *maxWidth, *maxHeight)
+	// The other modes go out too: a sender asking for a lower resolution needs to
+	// know which ones this screen will actually accept.
+	srv, err := discovery.Announce(*name, *port, *pairing, id, *maxWidth, *maxHeight,
+		media.DisplayModes())
 	if err != nil {
 		return fmt.Errorf("mDNS announcement: %w", err)
 	}

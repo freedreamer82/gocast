@@ -1,0 +1,7 @@
+# Built binaries: the name of the target is the name of the file.
+/gocast
+/gocast-arm64
+/gocast-armv7
+
+# scp to "pi@host" without the trailing colon lands the binary here.
+pi@*

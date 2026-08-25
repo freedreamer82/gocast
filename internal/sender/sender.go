@@ -9,6 +9,7 @@ import (
 	"gocast/internal/discovery"
 	"gocast/internal/media"
 	"gocast/internal/portal"
+	"gocast/internal/version"
 	"log"
 	"net"
 	"os"
@@ -267,6 +268,40 @@ func (f framing) borderChain() string {
 		f.src.W, f.src.H)
 }
 
+// chooseFrame decides which of the receiver's display modes to fill.
+//
+// Without --width it is the preferred one, which is what the receiver announces
+// as its screen size. With --width it is the largest announced mode no wider
+// than that — because asking a receiver for 1200 pixels of width when its
+// screen has no such mode gets the stream refused in negotiation, while asking
+// for 1280x720 works on any screen that lists it.
+//
+// A receiver that announces no mode list keeps the old behaviour: its preferred
+// size, and --width ignored.
+func chooseFrame(r discovery.Receiver, width int) media.Rect {
+	preferred := media.Rect{W: r.MaxWidth, H: r.MaxHeight}
+	if width <= 0 || preferred.Empty() || width >= preferred.W {
+		return preferred
+	}
+
+	best := media.Rect{}
+	for _, m := range r.Modes {
+		if m.W > width || m.Empty() {
+			continue
+		}
+		if m.W > best.W {
+			best = m
+		}
+	}
+	if best.Empty() {
+		log.Printf("the receiver announces no mode at or below %d pixels wide: "+
+			"staying at %dx%d", width, preferred.W, preferred.H)
+		return preferred
+	}
+	log.Printf("--width %d: using the %dx%d mode the receiver announced", width, best.W, best.H)
+	return best
+}
+
 // Probe counts the frames the source really delivers, with no network and no
 // encoder in the way. It separates two faults that look identical from outside:
 // a portal that produces no new frames, and a downstream chain that fails to
@@ -440,6 +475,19 @@ func Send(ctx context.Context, args []string) error {
 	target, tport := pick.Host, pick.Port
 	log.Printf("receiver: %s (%s:%d)", pick.Name, target, tport)
 
+	// A version gap is worth saying out loud, once, before anything else goes
+	// wrong: the two halves are installed separately and drift apart without
+	// warning, and the symptoms — a flag ignored, a resolution that will not
+	// change — point anywhere but here.
+	switch {
+	case pick.Version == "":
+		log.Printf("the receiver does not announce a version: it predates this "+
+			"sender (v%s), so some options may be ignored", version.String())
+	case pick.Version != version.String():
+		log.Printf("version mismatch: receiver v%s, sender v%s — update the older side "+
+			"if something behaves oddly", pick.Version, version.String())
+	}
+
 	// The receiver declares in its announcement whether it requires pairing, so
 	// we can say so right away instead of transmitting for a few seconds and then
 	// being turned away for no obvious reason.
@@ -563,14 +611,18 @@ func Send(ctx context.Context, args []string) error {
 			// only replaces caps when given all of them.
 			out = srcSize
 		}
-		if frame := (media.Rect{W: pick.MaxWidth, H: pick.MaxHeight}); !frame.Empty() && *stretch {
+		// A lower resolution is a request for a *different display mode*, not for
+		// an arbitrary smaller size: the receiver draws by setting a mode and
+		// refuses anything else. So --width picks the largest mode the receiver
+		// announced that fits, and the picture is framed into that instead.
+		if frame := chooseFrame(pick, *width); !frame.Empty() && *stretch {
 			// Distorted on purpose: proportions are lost, the picture fills the
 			// frame. An escape hatch for a receiver whose frame does not suit
 			// letterboxing.
 			out = frame
 			log.Printf("source %dx%d, transmitting %dx%d distorted (--stretch)",
 				srcSize.W, srcSize.H, frame.W, frame.H)
-		} else if frame := (media.Rect{W: pick.MaxWidth, H: pick.MaxHeight}); !frame.Empty() {
+		} else if frame := chooseFrame(pick, *width); !frame.Empty() {
 			f := letterbox(srcSize, frame)
 			box, out = &f, frame
 			log.Printf("source %dx%d, transmitting %dx%d inside the %dx%d frame (bars %d/%d)",

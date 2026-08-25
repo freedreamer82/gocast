@@ -7,9 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"gocast/internal/control"
+	"gocast/internal/media"
+	"gocast/internal/version"
 	"log"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -50,6 +53,30 @@ const txtMaxWidth = "maxw="
 // that is not one of the monitor's own.
 const txtMaxHeight = "maxh="
 
+// txtModes lists the other resolutions the receiver's screen accepts, beyond
+// the preferred one carried by maxw/maxh.
+//
+// Without this a sender asking for a lower resolution has nowhere to go: the
+// receiver draws by setting a display mode and refuses any size that is not one
+// of the screen's own, so the sender cannot simply pick a smaller number. With
+// the list it can choose the largest mode that fits what was asked for.
+//
+// Kept short on purpose: a TXT record is limited to 255 bytes per string, and
+// the small modes at the bottom of the list are of no use to anybody.
+const txtModes = "modes="
+
+// txtVersion is what the receiver is running.
+//
+// The two halves live on different machines and are updated at different times.
+// A sender talking to an older receiver — or the other way round — fails in ways
+// that look like anything but a version gap: a flag that is ignored, a
+// resolution that never changes, a black screen. Announcing it costs a dozen
+// bytes and turns an hour of diagnosis into one line.
+const txtVersion = "ver="
+
+// maxAnnouncedModes is how many are worth announcing.
+const maxAnnouncedModes = 8
+
 type Receiver struct {
 	Name string
 	Host string
@@ -73,9 +100,17 @@ type Receiver struct {
 	// MaxHeight: the height of the receiver's screen, 0 if it did not declare it.
 	// When present, together with MaxWidth it describes an exact frame to fill.
 	MaxHeight int
+
+	// Modes: the other resolutions the screen accepts, preferred first. Empty
+	// for a receiver that does not announce them.
+	Modes []media.Rect
+
+	// Version of the receiver, empty for one too old to announce it.
+	Version string
 }
 
-func Announce(name string, port int, pairing bool, id string, maxWidth, maxHeight int) (*zeroconf.Server, error) {
+func Announce(name string, port int, pairing bool, id string, maxWidth, maxHeight int,
+	modes []media.Rect) (*zeroconf.Server, error) {
 	if name == "" {
 		h, err := os.Hostname()
 		if err != nil {
@@ -99,8 +134,81 @@ func Announce(name string, port int, pairing bool, id string, maxWidth, maxHeigh
 		txtID + id,
 		txtMaxWidth + strconv.Itoa(maxWidth),
 		txtMaxHeight + strconv.Itoa(maxHeight),
+		txtVersion + version.String(),
+	}
+	if list := encodeModes(modes); list != "" {
+		txt = append(txt, txtModes+list)
 	}
 	return zeroconf.Register(name, serviceType, "local.", port, txt, nil)
+}
+
+// encodeModes renders the modes as "1920x1080,1600x900,1280x720".
+//
+// Only the ones shaped like the screen, widest first. A television lists plenty
+// of modes inherited from the monitor world — 1280x1024 is 5:4, 1280x800 is
+// 16:10 — and picking one of those to honour a request for "1280 wide" would
+// letterbox a 16:9 desktop into the wrong shape. Filtering by aspect ratio also
+// keeps the useful sizes from being pushed out of the record by the odd ones.
+func encodeModes(modes []media.Rect) string {
+	if len(modes) == 0 {
+		return ""
+	}
+	shape := ratio(modes[0])
+
+	var kept []media.Rect
+	for _, m := range modes {
+		if m.Empty() || !sameShape(ratio(m), shape) {
+			continue
+		}
+		kept = append(kept, m)
+	}
+	sort.Slice(kept, func(i, j int) bool { return kept[i].W > kept[j].W })
+
+	var parts []string
+	for _, m := range kept {
+		if len(parts) >= maxAnnouncedModes {
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%dx%d", m.W, m.H))
+	}
+	return strings.Join(parts, ",")
+}
+
+func ratio(r media.Rect) float64 {
+	if r.H == 0 {
+		return 0
+	}
+	return float64(r.W) / float64(r.H)
+}
+
+// sameShape allows a couple of per cent: 1366x768 is 16:9 in intent and
+// 1.779 in arithmetic, and excluding it would drop a mode every screen has.
+func sameShape(a, b float64) bool {
+	if b == 0 {
+		return false
+	}
+	d := a/b - 1
+	return d > -0.03 && d < 0.03
+}
+
+// decodeModes reads back what encodeModes wrote, skipping anything malformed:
+// an unreadable entry costs one resolution, a refusal to parse would cost the
+// whole announcement.
+func decodeModes(s string) []media.Rect {
+	var out []media.Rect
+	for _, part := range strings.Split(s, ",") {
+		w, h, ok := strings.Cut(strings.TrimSpace(part), "x")
+		if !ok {
+			continue
+		}
+		W, err1 := strconv.Atoi(w)
+		H, err2 := strconv.Atoi(h)
+		if err1 != nil || err2 != nil || W <= 0 || H <= 0 {
+			continue
+		}
+		out = append(out, media.Rect{W: W, H: H})
+	}
+	return out
 }
 
 func browse(ctx context.Context, timeout time.Duration) ([]Receiver, error) {
@@ -143,6 +251,8 @@ func browse(ctx context.Context, timeout time.Duration) ([]Receiver, error) {
 		seen[key] = true
 
 		pairing, id, maxw, maxh := false, "", 0, 0
+		ver := ""
+		var modes []media.Rect
 		for _, t := range e.Text {
 			switch {
 			case strings.HasPrefix(t, txtPairing):
@@ -151,6 +261,10 @@ func browse(ctx context.Context, timeout time.Duration) ([]Receiver, error) {
 				id = strings.TrimPrefix(t, txtID)
 			case strings.HasPrefix(t, txtMaxHeight):
 				maxh, _ = strconv.Atoi(strings.TrimPrefix(t, txtMaxHeight))
+			case strings.HasPrefix(t, txtVersion):
+				ver = strings.TrimPrefix(t, txtVersion)
+			case strings.HasPrefix(t, txtModes):
+				modes = decodeModes(strings.TrimPrefix(t, txtModes))
 			case strings.HasPrefix(t, txtMaxWidth):
 				maxw, _ = strconv.Atoi(strings.TrimPrefix(t, txtMaxWidth))
 			}
@@ -158,7 +272,8 @@ func browse(ctx context.Context, timeout time.Duration) ([]Receiver, error) {
 
 		r := Receiver{
 			Name: e.Instance, Host: host, Port: e.Port,
-			ID: id, Pairing: pairing, MaxWidth: maxw, MaxHeight: maxh,
+			ID: id, Pairing: pairing, MaxWidth: maxw, MaxHeight: maxh, Modes: modes,
+			Version: ver,
 		}
 		out = append(out, r)
 	}
@@ -240,10 +355,23 @@ func List(ctx context.Context, args []string) error {
 		return nil
 	}
 	for _, r := range rs {
-		fmt.Printf("%-24s %s:%-6d %-26s %s\n",
-			r.Name, r.Host, r.Port, pairingState(r), widthLimit(r))
+		fmt.Printf("%-24s %s:%-6d %-26s %-22s %s\n",
+			r.Name, r.Host, r.Port, pairingState(r), widthLimit(r), versionOf(r))
 	}
 	return nil
+}
+
+// versionOf marks a receiver whose version differs from ours: the mismatch is
+// worth seeing before it turns into a feature that mysteriously does nothing.
+func versionOf(r Receiver) string {
+	switch {
+	case r.Version == "":
+		return "(version unknown)"
+	case r.Version != version.String():
+		return "v" + r.Version + " (we are v" + version.String() + ")"
+	default:
+		return "v" + r.Version
+	}
 }
 
 func pairingState(r Receiver) string {

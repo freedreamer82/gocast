@@ -18,6 +18,7 @@ import (
 	"gocast/internal/media"
 	"gocast/internal/receiver"
 	"gocast/internal/sender"
+	"gocast/internal/version"
 )
 
 func usage() {
@@ -43,6 +44,10 @@ func usage() {
         Diagnostic: counts the frames the screen source actually delivers,
         with no network and no encoder. Tells a portal that produces nothing
         apart from a downstream chain that fails to pass frames on.
+
+  gocast version
+        Prints the version of this binary. The receiver announces its own,
+        and gocast list shows both when they differ.
 
   gocast crop
         Diagnostic: shows how the portal's buffer is made — how much of it is
@@ -77,6 +82,9 @@ func main() {
 		err = sender.Crop(ctx, os.Args[2:])
 	case "pair":
 		err = sender.Pair(ctx, os.Args[2:])
+	case "version", "-v", "--version":
+		fmt.Println("gocast " + version.String())
+		return
 	case "help", "-h", "--help":
 		usage()
 		return

@@ -172,6 +172,10 @@ raspberry   192.168.1.97:5000   open   screen 1920x1080
 $ gocast send                          # to the first receiver found
 $ gocast send --host 192.168.1.97      # to a specific one
 $ gocast send --bitrate 6000 --fps 30  # tuning
+$ gocast send --width 1280             # ask for a smaller mode, see below
+
+$ gocast version                       # what this half is running
+gocast 0.2.0+9830f58
 ```
 
 On the receiver, when not running as a service:
@@ -200,6 +204,7 @@ Paired with raspberry. From now on you can transmit without retyping the code.
 | `--host` | mDNS search | receiver address |
 | `--bitrate` | 12000 | video bitrate, kbit/s |
 | `--fps` | 25 | maximum frames per second |
+| `--width` | receiver's screen | scale down to a mode the receiver announced |
 | `--keyint` | one per second | frames between keyframes |
 | `--preset` | veryfast | x264 preset |
 | `--crop` | auto | `auto`, `WIDTHxHEIGHT[+X+Y]` or `no` |
@@ -314,6 +319,27 @@ of the monitor's own modes. An ultrawide scaled to a 1920 ceiling produces
 
 So the receiver announces its screen size over mDNS, and the sender fits the
 picture inside it with black bars.
+
+It also announces the other modes its screen accepts, which is what `--width`
+picks from: the sender drops down to the largest announced mode at or below the
+requested width, and says so. Asking for a width the receiver has no mode for
+would get the stream refused in negotiation, and from the sofa that looks like
+"lower resolutions don't work". Modes of a different shape than the main one are
+left out of the announcement, so a 16:9 TV never offers its 5:4 leftovers.
+
+### Both halves say what they are
+
+`gocast version` prints the release plus the commit it was built from, the
+receiver logs it at startup, and it travels in the mDNS announcement — so
+`gocast list` shows the receiver's version without logging into it, and the
+sender warns when the two differ.
+
+The GNOME menu has an **Info** entry with the same thing from the desktop: the
+sender's version and which binary it found, the extension's own version, and
+every receiver on the network with its screen size and version. The two halves
+are installed by separate commands and drift apart quietly, and the symptoms of
+a mismatch — an option ignored, a resolution that will not change — point
+anywhere but at the versions.
 
 ### Playback: GStreamer, with ffmpeg as an escape hatch
 

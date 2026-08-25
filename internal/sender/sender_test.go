@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"gocast/internal/discovery"
 	"gocast/internal/media"
 )
 
@@ -277,4 +278,42 @@ func TestVbvCapsTheSingleFrame(t *testing.T) {
 	if !strings.Contains(vbvOptions(1000), "vbv-bufsize=200") {
 		t.Errorf("minimum buffer not respected: %q", vbvOptions(1000))
 	}
+}
+
+// A lower resolution is a request for a different display mode, not for an
+// arbitrary smaller size: the receiver refuses anything that is not one of its
+// screen's modes, so --width has to land on one of the announced ones.
+func TestChooseFrame(t *testing.T) {
+	r := discovery.Receiver{
+		MaxWidth: 1920, MaxHeight: 1080,
+		Modes: []media.Rect{
+			{W: 1920, H: 1080}, {W: 1280, H: 720}, {W: 1024, H: 768}, {W: 800, H: 600},
+		},
+	}
+
+	cases := []struct {
+		name  string
+		width int
+		want  media.Rect
+	}{
+		{"without --width the preferred mode", 0, media.Rect{W: 1920, H: 1080}},
+		{"exactly a mode", 1280, media.Rect{W: 1280, H: 720}},
+		{"between two modes takes the lower one", 1200, media.Rect{W: 1024, H: 768}},
+		{"above the screen stays at the preferred", 3440, media.Rect{W: 1920, H: 1080}},
+		{"below every mode stays at the preferred", 320, media.Rect{W: 1920, H: 1080}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := chooseFrame(r, c.width); got != c.want {
+				t.Errorf("chooseFrame(%d) = %v, want %v", c.width, got, c.want)
+			}
+		})
+	}
+
+	t.Run("a receiver announcing no modes keeps the old behaviour", func(t *testing.T) {
+		old := discovery.Receiver{MaxWidth: 1920, MaxHeight: 1080}
+		if got := chooseFrame(old, 1280); got != (media.Rect{W: 1920, H: 1080}) {
+			t.Errorf("want the preferred size, got %v", got)
+		}
+	})
 }

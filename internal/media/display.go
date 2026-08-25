@@ -36,6 +36,40 @@ func DisplayMode() Rect {
 	return Rect{}
 }
 
+// DisplayModes lists every distinct mode the attached screen advertises, the
+// preferred one first.
+//
+// The receiver announces these so that a sender asking for a lower resolution
+// can pick one the display will actually accept. kmssink draws by setting a
+// mode, so an arbitrary smaller size is refused: 1280x720 works because the
+// screen offers it, 1200x675 does not because no screen does.
+func DisplayModes() []Rect {
+	paths, _ := filepath.Glob("/sys/class/drm/card*-*/modes")
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+
+		var out []Rect
+		seen := map[Rect]bool{}
+		for _, line := range strings.Split(string(data), "\n") {
+			r := parseMode(strings.TrimSpace(line))
+			// Interlaced modes parse to the same size as their progressive twin,
+			// which is why duplicates are dropped rather than counted.
+			if r.Empty() || seen[r] {
+				continue
+			}
+			seen[r] = true
+			out = append(out, r)
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return nil
+}
+
 // parseMode reads a line such as "1920x1080".
 func parseMode(s string) Rect {
 	w, h, ok := strings.Cut(s, "x")

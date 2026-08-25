@@ -56,7 +56,10 @@ const AREA_PREFIX = 'GOCAST-AREA ';
 // Offered widths. Anything above what a receiver declares is hidden for that
 // receiver: the binary would clamp it anyway, and a menu that offers choices it
 // cannot honour is worse than one that omits them.
-const WIDTHS = [1920, 1280, 960, 640];
+/* Offered when a receiver is too old to announce its own modes. A modern one
+ * lists what its screen actually accepts, which is the only thing that works:
+ * the receiver draws by setting a display mode and refuses any other size. */
+const FALLBACK_WIDTHS = [1920, 1280, 960, 640];
 
 /* Asks for the code that the receiver is showing on its screen.
  *
@@ -117,8 +120,10 @@ class PairDialog extends ModalDialog.ModalDialog {
 
 const Indicator = GObject.registerClass(
 class GoCastIndicator extends PanelMenu.Button {
-    _init() {
+    _init(extensionVersion) {
         super._init(0.0, 'GoCast', false);
+
+        this._extensionVersion = extensionVersion;
 
         this._icon = new St.Icon({
             icon_name: 'video-display-symbolic',
@@ -142,6 +147,7 @@ class GoCastIndicator extends PanelMenu.Button {
         });
 
         this._rebuild();
+        this._readVersion();
         this._scan();
     }
 
@@ -173,6 +179,7 @@ class GoCastIndicator extends PanelMenu.Button {
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         this.menu.addMenuItem(this._settings());
+        this.menu.addMenuItem(this._info());
 
         const again = new PopupMenu.PopupMenuItem(
             this._scanning ? 'Searching…' : 'Search again');
@@ -202,12 +209,37 @@ class GoCastIndicator extends PanelMenu.Button {
         max.connect('activate', () => this._start(r, 0));
         item.menu.addMenuItem(max);
 
-        for (const w of WIDTHS) {
-            if (r.MaxWidth > 0 && w >= r.MaxWidth)
-                continue;
-            const sub = new PopupMenu.PopupMenuItem(`${w}px`);
-            sub.connect('activate', () => this._start(r, w));
-            item.menu.addMenuItem(sub);
+        /* The modes the receiver announced, rather than a list of round numbers:
+         * asking for a width its screen has no mode for gets the stream refused
+         * in negotiation, and from here that looks like "lower resolutions do
+         * not work". */
+        const modes = (r.Modes || []).filter(m => m.W > 0 && m.W < r.MaxWidth);
+        if (modes.length > 0) {
+            for (const m of modes) {
+                const sub = new PopupMenu.PopupMenuItem(`${m.W}×${m.H}`);
+                sub.connect('activate', () => this._start(r, m.W));
+                item.menu.addMenuItem(sub);
+            }
+        } else {
+            for (const w of FALLBACK_WIDTHS) {
+                if (r.MaxWidth > 0 && w >= r.MaxWidth)
+                    continue;
+                const sub = new PopupMenu.PopupMenuItem(`${w}px`);
+                sub.connect('activate', () => this._start(r, w));
+                item.menu.addMenuItem(sub);
+            }
+        }
+
+        /* A version gap is shown where the choice is made. The two halves are
+         * installed separately and drift apart without warning, and the symptoms
+         * — an option ignored, a resolution that will not change — point
+         * anywhere but here. */
+        const note = this._versionNote(r);
+        if (note) {
+            item.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+            const v = new PopupMenu.PopupMenuItem(note);
+            v.setSensitive(false);
+            item.menu.addMenuItem(v);
         }
         return item;
     }
@@ -241,6 +273,79 @@ class GoCastIndicator extends PanelMenu.Button {
         menu.menu.addMenuItem(debug);
 
         return menu;
+    }
+
+    /* _info shows what is installed on each side.
+     *
+     * The two halves live on different machines and are updated by different
+     * commands, so "which versions am I actually running" is the first question
+     * when something behaves oddly — and until now it could only be answered
+     * from a terminal on both. */
+    _info() {
+        const menu = new PopupMenu.PopupSubMenuMenuItem('Info');
+
+        const line = text => {
+            const i = new PopupMenu.PopupMenuItem(text);
+            i.setSensitive(false);
+            i.label.clutter_text.line_wrap = true;
+            menu.menu.addMenuItem(i);
+        };
+
+        line(`Sender: gocast ${this._version || 'unknown'}`);
+        line(`Binary: ${BINARY}`);
+        line(`Extension: ${this._extensionVersion || 'unknown'}`);
+
+        menu.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        if (this._receivers === null)
+            line('Receivers: searching…');
+        else if (this._receivers.length === 0)
+            line('Receivers: none found');
+        else {
+            for (const r of this._receivers) {
+                const screen = r.MaxWidth > 0 ? `${r.MaxWidth}×${r.MaxHeight}` : 'unknown screen';
+                line(`${r.Name} — ${r.Host}:${r.Port}`);
+                line(`    ${screen} · ${this._versionNote(r)}`);
+            }
+        }
+
+        return menu;
+    }
+
+    /* Versions ---------------------------------------------------------- */
+
+    /* Reads the version of the binary this extension will actually launch.
+     *
+     * Asked of the binary rather than hard-coded here: the extension and the
+     * binary are installed by separate commands, and hard-coding would make the
+     * extension confidently report a version it is not running. */
+    _readVersion() {
+        let proc;
+        try {
+            proc = this._launcher(Gio.SubprocessFlags.STDOUT_PIPE)
+                .spawnv([BINARY, 'version']);
+        } catch (e) {
+            return;
+        }
+        proc.communicate_utf8_async(null, null, (p, res) => {
+            try {
+                const [, out] = p.communicate_utf8_finish(res);
+                this._version = (out || '').trim().replace(/^gocast\s+/, '');
+            } catch (e) {
+                // A binary too old to know the command: left unknown, and the
+                // note below says so rather than claiming a match.
+            }
+        });
+    }
+
+    /* _versionNote returns what to show about the version, or '' when there is
+     * nothing worth saying. */
+    _versionNote(r) {
+        if (!r.Version)
+            return 'receiver too old to report its version';
+        if (this._version && r.Version !== this._version)
+            return `receiver v${r.Version} · sender v${this._version} — update one side`;
+        return `v${r.Version}`;
     }
 
     /* Child processes -------------------------------------------------- */
@@ -528,7 +633,8 @@ export default class GoCastExtension extends Extension {
         BINARY = findBinary();
         console.log(`gocast: using ${BINARY}`);
 
-        this._indicator = new Indicator();
+        this._indicator = new Indicator(
+            this.metadata['version-name'] || String(this.metadata.version || ''));
         Main.panel.addToStatusArea(this.uuid, this._indicator);
     }
 
