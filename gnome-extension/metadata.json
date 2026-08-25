@@ -1,0 +1,7 @@
+{
+  "uuid": "gocast@local",
+  "name": "GoCast",
+  "description": "Condivide lo schermo su un ricevitore gocast trovato in rete. Il video passa dal cavo, non dal Wi-Fi.",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "url": ""
+}

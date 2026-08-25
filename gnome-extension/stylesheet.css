@@ -1,0 +1,6 @@
+/* Rosso mentre si trasmette: con il ricevitore in un'altra stanza, l'icona e'
+   l'unico posto dove si vede che qualcosa sta uscendo da questo schermo.
+   Il rosso e' la convenzione con cui GNOME segnala una registrazione in corso. */
+.gocast-active {
+    color: #e01b24;
+}

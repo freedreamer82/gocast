@@ -1,0 +1,19 @@
+[Unit]
+Description=gocast — ricevitore schermo su HDMI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/gocast serve
+Restart=always
+RestartSec=3
+
+# kmssink deve poter diventare DRM master per scrivere sull'HDMI.
+SupplementaryGroups=video render
+
+# Ripulisce eventuali pipeline orfane che terrebbero occupato il DRM
+# e impedirebbero al prossimo avvio di prendere il display.
+ExecStopPost=-/usr/bin/pkill -f "gst-launch-1.0.*udpsrc"
+
+[Install]
+WantedBy=multi-user.target
