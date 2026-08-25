@@ -17,8 +17,36 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-// Must live somewhere on gnome-shell's PATH: /usr/local/bin does.
-const BINARY = 'gocast';
+// Where to look for the binary, in order.
+//
+// Looking it up ourselves rather than relying on the name alone: gnome-shell is
+// started by the display manager, and its PATH is not the one from a login
+// shell — on several distributions /usr/local/bin is missing from it, so a
+// perfectly installed gocast is reported as "not found" and there is nothing in
+// the message to suggest where to look.
+//
+// The bare name stays last: if the shell does have it on PATH, that is the one
+// the user expects to run.
+const BINARY_CANDIDATES = [
+    '/usr/local/bin/gocast',
+    '/usr/bin/gocast',
+    GLib.build_filenamev([GLib.get_home_dir(), '.local', 'bin', 'gocast']),
+    GLib.build_filenamev([GLib.get_home_dir(), 'bin', 'gocast']),
+];
+
+// Resolved once at startup by findBinary(); the bare name is the fallback.
+let BINARY = 'gocast';
+
+/* findBinary returns the first candidate that exists and can be executed,
+ * falling back to whatever GLib can find on PATH. */
+function findBinary() {
+    for (const path of BINARY_CANDIDATES) {
+        if (GLib.file_test(path, GLib.FileTest.IS_EXECUTABLE))
+            return path;
+    }
+    const onPath = GLib.find_program_in_path('gocast');
+    return onPath !== null ? onPath : 'gocast';
+}
 const SCAN_WAIT = '2s';
 const SIGTERM = 15;
 
@@ -237,7 +265,10 @@ class GoCastIndicator extends PanelMenu.Button {
             ).spawnv([BINARY, 'list', '--json', '--wait', SCAN_WAIT]);
         } catch (e) {
             this._receivers = [];
-            this._fail(`${BINARY} not found on PATH`, e);
+            this._fail(
+                `gocast not found — looked in ${BINARY_CANDIDATES.join(', ')} ` +
+                `and on PATH. Install it with: sudo install -m755 gocast /usr/local/bin/`,
+                e);
             return;
         }
 
@@ -491,6 +522,12 @@ class GoCastIndicator extends PanelMenu.Button {
 
 export default class GoCastExtension extends Extension {
     enable() {
+        // Resolved here rather than at import time: the binary may well be
+        // installed while the extension is loaded, and enabling it again is a
+        // cheaper fix to suggest than a logout.
+        BINARY = findBinary();
+        console.log(`gocast: using ${BINARY}`);
+
         this._indicator = new Indicator();
         Main.panel.addToStatusArea(this.uuid, this._indicator);
     }
