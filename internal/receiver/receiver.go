@@ -9,6 +9,7 @@ import (
 	"gocast/internal/media"
 	"io"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -173,10 +174,9 @@ func (c *playbackChain) run(ctx context.Context, src io.Reader) error {
 	// are lost. Measured on the same stream: 14% of one core here against 80%
 	// with ffmpeg and the raw pipe in between.
 	cmd := exec.CommandContext(ctx, "gst-launch-1.0", media.SplitPipeline(c.desc())...)
-	cmd.Stdin = src
 	cmd.Stdout = media.ErrOut
 	cmd.Stderr = media.ErrOut
-	return cmd.Run()
+	return runWithSource(cmd, src)
 }
 
 func (c *playbackChain) current() playbackConfig { return c.configs[c.i] }
@@ -225,9 +225,14 @@ func Serve(ctx context.Context, args []string) error {
 		"screen height, 0 = detected")
 	pairing := fs.Bool("pairing", false,
 		"require pairing: the code appears on this screen, so only somebody in front of it can read it")
+	idleImage := fs.String("idle-image", "",
+		"picture to show while nobody is transmitting (default: a splash with the receiver name)")
 	pairWindow := fs.Duration("pair-window", time.Minute,
 		"how long the pairing code stays valid and on screen")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := checkIdleImage(*idleImage); err != nil {
 		return err
 	}
 
@@ -317,11 +322,18 @@ func Serve(ctx context.Context, args []string) error {
 		return fmt.Errorf("decoder %q is not installed on this machine", *decoder)
 	}
 
+	idle := &idleScreen{
+		sink:  *sink,
+		frame: media.Rect{W: *maxWidth, H: *maxHeight},
+		image: *idleImage,
+		name:  announcedName(*name),
+	}
+
 	if chain.ff != nil {
 		log.Printf("listening on TCP %d — %s", *port, chain.describe())
 		screen := &pairScreen{sink: *sink, ctx: ctx}
 		arb := control.NewArbiter(ctx, *port, *pairing, *pairWindow, screen.show, screen.hide)
-		return serveStreamTCP(ctx, *port, chain, *verbose || *stats, arb)
+		return serveStreamTCP(ctx, *port, chain, *verbose || *stats, arb, idle)
 	}
 
 	desc := chain.desc()
@@ -348,7 +360,20 @@ func Serve(ctx context.Context, args []string) error {
 	screen := &pairScreen{sink: *sink, ctx: ctx}
 	arb := control.NewArbiter(ctx, *port, *pairing, *pairWindow, screen.show, screen.hide)
 
-	return serveStreamTCP(ctx, *port, chain, *verbose || *stats, arb)
+	return serveStreamTCP(ctx, *port, chain, *verbose || *stats, arb, idle)
+}
+
+// announcedName is the name shown on the idle screen: the same one the receiver
+// announces over mDNS, so that whoever is standing in front of the TV reads the
+// very name they will pick on the PC.
+func announcedName(flag string) string {
+	if flag != "" {
+		return flag
+	}
+	if h, err := os.Hostname(); err == nil {
+		return h
+	}
+	return "gocast"
 }
 
 // resolveAudioOut decides which ALSA device to play on, or returns an empty

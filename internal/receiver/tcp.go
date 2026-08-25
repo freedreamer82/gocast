@@ -7,6 +7,8 @@ import (
 	"io"
 	"log"
 	"net"
+	"os/exec"
+	"time"
 )
 
 // serveStreamTCP accepts the sender's connection and hands its bytes to the
@@ -23,7 +25,7 @@ import (
 // prolonged silence, and the in-flight datagrams of a sender that had just been
 // dismissed would reopen the session by themselves.
 func serveStreamTCP(ctx context.Context, port int, chain *playbackChain,
-	verbose bool, arb *control.Arbiter) error {
+	verbose bool, arb *control.Arbiter, idle *idleScreen) error {
 
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -57,6 +59,11 @@ func serveStreamTCP(ctx context.Context, port int, chain *playbackChain,
 		}
 	}()
 
+	// Something on the screen while waiting: without it the TV shows the console,
+	// and a receiver that is ready looks exactly like one that has crashed.
+	idle.show(ctx)
+	defer idle.hide()
+
 	for ctx.Err() == nil {
 		conn, ok := <-conns
 		if !ok {
@@ -72,6 +79,10 @@ func serveStreamTCP(ctx context.Context, port int, chain *playbackChain,
 		}
 
 		log.Printf("stream arriving from %s", ip)
+
+		// The idle screen holds the sink, and therefore the display: it has to be
+		// gone before playback starts, not merely asked to go.
+		idle.hide()
 		arb.Busy.Store(true)
 		runCtx, cancel := context.WithCancel(ctx)
 
@@ -124,6 +135,7 @@ func serveStreamTCP(ctx context.Context, port int, chain *playbackChain,
 
 		if ctx.Err() == nil {
 			log.Print("stream ended, waiting for the next sender")
+			idle.show(ctx)
 		}
 	}
 	return nil
@@ -165,5 +177,60 @@ func copyTo(src io.Reader, dsts ...io.Writer) error {
 			}
 			return err
 		}
+	}
+}
+
+// runWithSource feeds src into the process's standard input and makes sure the
+// process actually ends when the stream does.
+//
+// Closing the input is not enough. gst-launch receives the EOS and, with these
+// sinks, can simply sit there: measured, a playback pipeline alive at zero CPU
+// two minutes after the sender had gone. And while it lives the session never
+// ends — the receiver still believes it is busy, refuses the next sender as a
+// second one, and never puts its idle screen back. Nothing in the logs says so.
+//
+// So the end of the stream is treated as an order, not a suggestion: the input
+// is closed, the process is given a moment to bow out on its own, and if it does
+// not it is killed.
+func runWithSource(cmd *exec.Cmd, src io.Reader, extra ...io.Writer) error {
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	dsts := append([]io.Writer{in}, extra...)
+	copyErr := copyTo(src, dsts...)
+
+	for _, d := range dsts {
+		if c, ok := d.(io.Closer); ok {
+			c.Close()
+		}
+	}
+	if err := waitOrKill(cmd, endGrace); err != nil && copyErr == nil {
+		return err
+	}
+	return copyErr
+}
+
+// How long a pipeline is given to end by itself once its input is closed.
+const endGrace = 3 * time.Second
+
+func waitOrKill(cmd *exec.Cmd, grace time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(grace):
+		log.Print("the pipeline did not end when the stream closed: stopping it")
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+		<-done
+		return nil
 	}
 }

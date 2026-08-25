@@ -205,8 +205,7 @@ func (p *ffmpegPlayer) run(ctx context.Context, src io.Reader) error {
 		return fmt.Errorf("starting the decoder: %w", err)
 	}
 
-	// Copy for as long as the sender transmits; when it closes, the pipes close
-	// and the processes end on their own.
+	// Copy for as long as the sender transmits, then close the inputs.
 	copyErr := copyTo(src, dsts...)
 	for _, d := range dsts {
 		if c, ok := d.(io.Closer); ok {
@@ -214,10 +213,12 @@ func (p *ffmpegPlayer) run(ctx context.Context, src io.Reader) error {
 		}
 	}
 
-	dec.Wait()
-	show.Wait()
+	// Waiting plainly is not safe: a pipeline can take the EOS and simply sit
+	// there, and while it lives the session never ends — see runWithSource.
+	waitOrKill(dec, endGrace)
+	waitOrKill(show, endGrace)
 	if audio != nil {
-		audio.Wait()
+		waitOrKill(audio, endGrace)
 	}
 	return copyErr
 }
