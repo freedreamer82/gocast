@@ -225,10 +225,60 @@ Paired with raspberry. From now on you can transmit without retyping the code.
 | `--pairing` | false | require a pairing code |
 | `--max-width` / `--max-height` | from the screen | what to announce |
 | `--audio-device` | detected HDMI | ALSA device |
+| `--audio-latency` | 150 | milliseconds of sound buffered before the card |
 
 </details>
 
 ## How it works
+
+### Audio latency
+
+Nothing in either pipeline is timed against a clock: every sink runs with
+`sync=false`, so the video sink draws each frame the moment it is decoded. That
+is what keeps the picture immediate, and it is also the reason the sound needs
+looking after — `alsasink` can only play at the speed of the card, never faster,
+so whatever is buffered in front of it is exactly how far the sound ends up
+behind the picture.
+
+Left to the defaults that came to about **1.2 seconds**: a `queue` holds a full
+second and `GstAudioBaseSink` keeps a 200 ms ring, and since nothing anywhere
+ever drops a late buffer, the first burst of a transmission fills them and they
+stay full for the rest of the session.
+
+`--audio-latency` is the whole budget, split between the two: 150 ms becomes a
+75 ms queue and a 75 ms ring. Below 100 ms the ring hits its floor — under about
+50 ms the card runs dry on the first thread scheduled late, and stuttering is a
+worse fault than lateness.
+
+Putting both sinks back on the clock, which is the textbook way to keep lip
+sync, was tried and removed. The audio sink has to run with `async=false` —
+when the sender transmits video only the audio branch never links, and a sink
+waiting to preroll takes the whole pipeline down with it. A sink that never
+prerolls also never negotiates latency, so with `sync=true` it judges every
+buffer late and drops it: silence, with occasional glitches. Measured on a
+Raspberry Pi 3 with `vc4hdmi`. Keeping the sound within about 100 ms of the
+picture solves the same problem without needing the clock at all.
+
+```
+$ gocast serve --audio-latency 100   # tighter
+$ gocast serve --audio-latency 300   # for a card that stutters
+$ gocast serve --audio-latency 0     # leave the driver's own defaults alone
+```
+
+The same accumulation had four places to happen, two of them on the sender, and
+all four are now bounded. The rule differs by branch, and the difference is the
+point:
+
+| where | on overflow | why |
+|---|---|---|
+| sender, before `x264enc` | drops the oldest | a raw frame costs nothing to lose |
+| sender, before the muxer | blocks | a hole in the sound is worse than the delay |
+| receiver, before `h264parse` | blocks | an encoded frame is a reference for the next ones |
+| receiver, audio branch | drops the oldest | AAC frames stand alone |
+
+A frame should be dropped where it is cheapest, which is before it has been
+encoded, sent, or decoded. So the receiver blocks, that backpressure travels up
+the TCP connection, and the sender drops a raw frame instead.
 
 ### Transport: TCP, not UDP
 

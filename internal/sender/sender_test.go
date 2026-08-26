@@ -317,3 +317,37 @@ func TestChooseFrame(t *testing.T) {
 		}
 	})
 }
+
+// No bare queue may survive in the send chain.
+//
+// A bare `queue` holds a full second, and on a live chain that second is a trap:
+// nothing here is timed against a clock, so a queue that fills at a transient
+// has no way to empty again and the delay it holds becomes permanent latency.
+// This test exists because the bare form is the one you write by reflex.
+func TestSendChainHasNoUnboundedQueue(t *testing.T) {
+	desc := senderPipeline("pipewiresrc fd=3 path=42", "", "192.168.1.97", 5000,
+		12000, 25, 25, "veryfast", media.Rect{W: 1920, H: 1080}, nil,
+		"@DEFAULT_MONITOR@", 200, false)
+
+	if strings.Contains(desc, "! queue !") || strings.HasSuffix(desc, "! queue") {
+		t.Errorf("a bare queue is back in the chain:\n%s", desc)
+	}
+	if n := strings.Count(desc, "max-size-time=200000000"); n != 2 {
+		t.Errorf("bounded queues found: %d, want 2 (video and audio):\n%s", n, desc)
+	}
+}
+
+// The video queue leaks, the audio queue does not.
+//
+// In front of x264enc the buffers are raw frames: dropping the oldest costs a
+// stutter and on a shared screen it is the right thing to drop, because what
+// matters is the screen as it is now. After the AAC encoder a dropped buffer is
+// a hole in the sound, which is worse than the latency it would save.
+func TestOnlyTheVideoQueueLeaks(t *testing.T) {
+	if got := liveQueue(true); !strings.Contains(got, "leaky=downstream") {
+		t.Errorf("the video queue does not leak: %s", got)
+	}
+	if got := liveQueue(false); strings.Contains(got, "leaky") {
+		t.Errorf("the audio queue leaks, which puts holes in the sound: %s", got)
+	}
+}

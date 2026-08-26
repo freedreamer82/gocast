@@ -747,6 +747,37 @@ func muxLatency(monitor string, ms int) string {
 	return fmt.Sprintf(" latency=%d", ms*1_000_000)
 }
 
+// liveQueueMS is how much a queue in the send chain may hold, in milliseconds.
+//
+// A bare `queue` holds a full second, and on a live chain that second is a trap
+// rather than a safety margin. Nothing here is ever timed against a clock: the
+// encoder takes frames as fast as they come and the muxer emits as fast as the
+// socket accepts, so a queue that fills has no mechanism to empty again. One
+// transient — the encoder stumbling on a busy machine, the receiver pausing
+// long enough for TCP to push back — and the queue stays full for the rest of
+// the transmission. The delay it holds becomes latency you cannot get rid of
+// without restarting.
+//
+// 200 ms absorbs the jitter a queue is actually there for and caps what a
+// transient can cost.
+const liveQueueMS = 200
+
+// liveQueue builds such a queue. With leak on it drops from the head, i.e. the
+// oldest frame, which on a shared screen is the frame nobody wants any more:
+// what matters is what is on the screen now, not the whole history of it.
+//
+// Leaking is safe in front of x264enc because these are raw frames — dropping
+// one costs a stutter and nothing else. It would not be safe after the encoder,
+// where every frame is a reference for the ones that follow.
+func liveQueue(leak bool) string {
+	q := fmt.Sprintf("queue max-size-buffers=0 max-size-bytes=0 max-size-time=%d",
+		liveQueueMS*1_000_000)
+	if leak {
+		q += " leaky=downstream"
+	}
+	return q
+}
+
 func senderPipeline(src, crop, host string, port, bitrate, fps, keyint int, preset string, out media.Rect, box *framing, monitor string, muxLatencyMs int, verbose bool) string {
 	verb := "-q"
 	if verbose {
@@ -805,11 +836,11 @@ func senderPipeline(src, crop, host string, port, bitrate, fps, keyint int, pres
 	// is no longer needed to fit a buffer into a datagram, but it does no harm and
 	// keeps the stream compatible with a UDP receiver.
 	desc := fmt.Sprintf(
-		"%s %s %s! videoconvert %s%s ! queue "+
+		"%s %s %s! videoconvert %s%s ! %s "+
 			"! x264enc tune=zerolatency speed-preset=%s bitrate=%d key-int-max=%d %s"+
 			"! h264parse config-interval=-1 ! mpegtsmux name=mux alignment=7%s "+
 			"! tcpclientsink host=%s port=%d",
-		verb, src, crop, boxing, scale, preset, bitrate, keyint,
+		verb, src, crop, boxing, scale, liveQueue(true), preset, bitrate, keyint,
 		vbvOptions(bitrate), muxLatency(monitor, muxLatencyMs), host, port)
 
 	if monitor == "" {
@@ -818,8 +849,8 @@ func senderPipeline(src, crop, host string, port, bitrate, fps, keyint int, pres
 	enc := aacEncoder()
 	return desc + fmt.Sprintf(
 		" pulsesrc device=%s ! audioconvert ! audioresample "+
-			"! %s bitrate=128000 ! aacparse ! queue ! mux.",
-		monitor, enc)
+			"! %s bitrate=128000 ! aacparse ! %s ! mux.",
+		monitor, enc, liveQueue(false))
 }
 
 // resolveAudioIn picks the audio source to capture, or an empty string when it

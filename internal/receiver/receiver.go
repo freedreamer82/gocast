@@ -16,6 +16,105 @@ import (
 	"time"
 )
 
+// playQueueMS is how much any queue in the playback chain may hold.
+//
+// A bare `queue` holds a full second, and there are two of them here: they were
+// most of a three-second delay measured on a real link. Nothing in this
+// pipeline is timed against a clock — every sink runs with sync=false — so no
+// element ever declares a frame late and drops it. The moment the receiver
+// falls behind the sender, even briefly, every elastic buffer in the chain
+// fills up; and with nothing to drain them they stay full for the rest of the
+// session. The delay stops growing and never comes back.
+//
+// Bounded, that same fall-behind turns into backpressure: the queue fills, the
+// demuxer blocks, TCP stops draining, and the sender's own queue — which does
+// leak — drops raw frames before the encoder. That is where a frame should be
+// dropped, because there it costs nothing: it has not been encoded, sent, or
+// decoded yet.
+const playQueueMS = 200
+
+// playQueue builds such a queue.
+//
+// Deliberately not leaky on the video branch: these are encoded frames, and
+// every one of them is a reference for the ones that follow. Dropping one here
+// does not cost a stutter, it costs garbage on screen until the next keyframe —
+// up to a full second. Blocking and letting the sender drop instead is both
+// cheaper and correct.
+func playQueue(leak bool) string {
+	q := fmt.Sprintf("queue max-size-buffers=0 max-size-bytes=0 max-size-time=%d",
+		playQueueMS*1_000_000)
+	if leak {
+		q += " leaky=downstream"
+	}
+	return q
+}
+
+// defaultAudioLatency is how deep the ALSA ring buffer is, in milliseconds.
+//
+// GstAudioBaseSink defaults to 200 ms, and with the video sink drawing each
+// frame the instant it is decoded that ring is pure skew: 200 ms of picture
+// ahead of sound, on top of whatever the queue in front of it holds.
+//
+// 100 ms halves that and still leaves the card four periods to be woken on,
+// which is what keeps a Raspberry from running dry. Below about 50 ms the
+// underruns start, and stuttering is a worse fault than lateness.
+// Below roughly 100 ms of sound lagging behind picture the eye stops pairing
+// the two as separate events, so the cheap way out of a lip-sync problem is not
+// to synchronise anything: it is to keep the whole audio budget under that.
+// 150 ms leaves the card room to breathe on a Pi and is already four times
+// better than the 1.2 s the defaults produced.
+const defaultAudioLatency = 150
+
+// alsaBufferProps returns the properties that set the ring depth, or an empty
+// string to leave the driver's own defaults alone.
+//
+// Zero has to mean "do not ask", and that is not a nicety. The Raspberry's
+// vc4hdmi is documented in this very tree as refusing buffer constraints it
+// does not like — it is why ffmpeg's ALSA muxer cannot open it at all, see
+// player.go — so a ring depth stated by us is one more thing that can make the
+// device fail to open. Whoever ends up with a silent television needs a way
+// back to the configuration the driver chooses for itself, without rebuilding
+// anything.
+//
+// Four periods per ring: fewer and a thread scheduled late empties it, more and
+// the wakeups cost CPU on a Pi for nothing.
+func alsaBufferProps(latMS int) string {
+	if latMS <= 0 {
+		return "" // the driver decides
+	}
+	half := audioHalf(latMS)
+	return fmt.Sprintf(" buffer-time=%d latency-time=%d", half*1000, half*1000/4)
+}
+
+// audioHalf is the share of the budget that goes to each of the two places
+// sound waits: the queue in front of the decoder and the ALSA ring.
+//
+// Halves, because what you hear is their sum. A floor of 50 ms on each: below
+// that the ring holds a couple of periods and the card runs dry on the first
+// thread scheduled late, and stuttering is a worse fault than lateness.
+func audioHalf(latMS int) int {
+	if half := latMS / 2; half > 50 {
+		return half
+	}
+	return 50
+}
+
+// audioQueue is the queue in front of the audio decoder, sized from the same
+// budget as the ring.
+//
+// It leaks, and here that is safe in a way it is not on the video branch: AAC
+// frames stand alone, so dropping the oldest costs a click, while dropping an
+// encoded video frame costs garbage on screen until the next keyframe.
+func audioQueue(latMS int) string {
+	ms := audioHalf(latMS)
+	if latMS <= 0 {
+		ms = playQueueMS // no budget stated: fall back to the generic bound
+	}
+	return fmt.Sprintf(
+		"queue max-size-buffers=0 max-size-bytes=0 max-size-time=%d leaky=downstream",
+		ms*1_000_000)
+}
+
 // receiverPipeline builds the playback pipeline.
 //
 // The capsfilters right after tsdemux are not decoration: the demuxer's pads
@@ -23,7 +122,7 @@ import (
 // video into the audio branch (a queue accepts any caps). With video/x-h264 and
 // audio/mpeg the routing is deterministic.
 func receiverPipeline(sink, audioDev string, stats, verbose bool,
-	dec, conv string) string {
+	dec, conv string, audioLat int) string {
 
 	// The audio branch always exists, even when nothing is played: if nobody
 	// consumes the audio pad, the demuxer's queue fills up and stalls video.
@@ -34,13 +133,15 @@ func receiverPipeline(sink, audioDev string, stats, verbose bool,
 	// stops after the first frame, while everything else — network, demuxer,
 	// decoder — looks perfectly healthy. Measured: 0 frames with async=true, 237
 	// with async=false.
-	audio := "d. ! audio/mpeg ! queue ! aacparse ! fakesink sync=false async=false"
+	audio := "d. ! audio/mpeg ! " + audioQueue(audioLat) +
+		" ! aacparse ! fakesink sync=false async=false"
 	if audioDev != "" {
 		audio = fmt.Sprintf(
-			"d. ! audio/mpeg ! queue ! aacparse ! avdec_aac "+
+			"d. ! audio/mpeg ! "+audioQueue(audioLat)+" ! aacparse ! avdec_aac "+
 				"! audioconvert ! audioresample "+
 				"! audio/x-raw,format=S16LE,rate=48000,channels=2 "+
-				"! alsasink device=%s sync=false async=false", audioDev)
+				"! alsasink device=%s sync=false async=false%s",
+			audioDev, alsaBufferProps(audioLat))
 	}
 
 	// With --stats the sink is replaced by fpsdisplaysink, which writes the frame
@@ -78,13 +179,25 @@ func receiverPipeline(sink, audioDev string, stats, verbose bool,
 	// before a single one got through.
 	return fmt.Sprintf(
 		"%s fdsrc fd=0 ! tsdemux name=d "+
-			"d. ! video/x-h264 ! queue ! h264parse ! %s %s! %s "+
+			"d. ! video/x-h264 ! "+playQueue(false)+" ! h264parse ! %s %s! %s "+
 			"%s",
 		verb, dec, conv, unsynced(sink), audio)
 }
 
 // unsynced turns clock synchronisation off, unless whoever passed --sink has
 // already decided for themselves.
+//
+// Putting both sinks back on the clock was tried, as the textbook way to keep
+// lip sync, and it does not work here. The audio sink has to run with
+// async=false — when the sender transmits video only, the audio branch never
+// links, and a sink waiting to preroll takes the whole pipeline down with it.
+// A sink that never prerolls also never negotiates latency, so with sync=true
+// it judges every buffer late and drops it: silence, with occasional glitches.
+// Measured on a Raspberry Pi 3 with vc4hdmi.
+//
+// The way out is not the clock, it is --audio-latency: keep the sound within
+// about 100 ms of the picture and the eye stops pairing them as separate
+// events. See alsaBufferProps.
 //
 // It is not there to unblock playback: measured, a sink with sync=true yields
 // the same number of frames. It is there to remove latency — for a live shared
@@ -109,6 +222,7 @@ func unsynced(sink string) string {
 type playbackChain struct {
 	sink, audioDev string
 	stats, verbose bool
+	audioLat       int // total milliseconds of sound buffered before the card
 
 	configs []playbackConfig
 	i       int
@@ -125,9 +239,9 @@ type playbackChain struct {
 type playbackConfig struct{ dec, conv string }
 
 func newPlaybackChain(sink, audioDev string, stats, verbose bool,
-	pinned string) *playbackChain {
+	pinned string, audioLat int) *playbackChain {
 	c := &playbackChain{sink: sink, audioDev: audioDev,
-		stats: stats, verbose: verbose}
+		stats: stats, verbose: verbose, audioLat: audioLat}
 
 	// A decoder pinned by hand excludes the others. It is needed where detection
 	// cannot get there on its own: on some Raspberry setups v4l2h264dec is
@@ -184,7 +298,8 @@ func (c *playbackChain) current() playbackConfig { return c.configs[c.i] }
 
 func (c *playbackChain) desc() string {
 	cfg := c.current()
-	return receiverPipeline(c.sink, c.audioDev, c.stats, c.verbose, cfg.dec, cfg.conv)
+	return receiverPipeline(c.sink, c.audioDev, c.stats, c.verbose, cfg.dec, cfg.conv,
+		c.audioLat)
 }
 
 // next steps to the following configuration, if there is one.
@@ -210,6 +325,10 @@ func Serve(ctx context.Context, args []string) error {
 	name := fs.String("name", "", "announced name (default: hostname)")
 	audio := fs.Bool("audio", true, "play the audio that arrives")
 	audioDev := fs.String("audio-device", "", "ALSA device (default: detected HDMI)")
+	audioLat := fs.Int("audio-latency", defaultAudioLatency,
+		"total milliseconds of sound buffered before the card, split between the "+
+			"queue and the ALSA ring: this is how far the sound lags behind the "+
+			"picture, so lower it until it stutters, 0 to leave the card's own default")
 	player := fs.String("player", "auto",
 		"what plays the stream: auto | ffmpeg | gstreamer")
 	decoder := fs.String("decoder", "",
@@ -292,7 +411,11 @@ func Serve(ctx context.Context, args []string) error {
 		log.Print("no pairing required: anybody on the network may transmit")
 	}
 
-	chain := newPlaybackChain(*sink, *audioDev, *stats, *verbose, *decoder)
+	if *audioLat < 0 {
+		return fmt.Errorf("--audio-latency %d: it is a number of milliseconds, "+
+			"use 0 to leave the sound card's own default alone", *audioLat)
+	}
+	chain := newPlaybackChain(*sink, *audioDev, *stats, *verbose, *decoder, *audioLat)
 
 	// ffmpeg only when asked for, or when GStreamer has no decoder at all.
 	//
@@ -355,6 +478,11 @@ func Serve(ctx context.Context, args []string) error {
 			strings.Join(missing, ", "))
 	}
 	log.Printf("listening on TCP %d — video %q via %q", *port, *sink, chain.current().dec)
+	if *audioDev != "" {
+		log.Printf("frames drawn as they arrive, up to %d ms of sound buffered: "+
+			"that is how far behind the picture the sound can be, lower "+
+			"--audio-latency to close it", *audioLat)
+	}
 	if len(chain.configs) > 1 {
 		log.Printf("%d more fallback configurations if the stream does not start",
 			len(chain.configs)-1)
