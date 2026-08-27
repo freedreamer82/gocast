@@ -138,6 +138,13 @@ class GoCastIndicator extends PanelMenu.Button {
         this._force = false;      // take over, cleared after one use
         this._debug = false;      // ask the binary to write a log file
 
+        // Which output's sound to transmit. null = leave it to the binary,
+        // which follows whatever the system considers active. Read once and
+        // kept: probing the audio server costs a subprocess, and the list does
+        // not change while a menu is open.
+        this._audioOutputs = null;   // null = never read
+        this._audioSource = null;    // null = follow the active output
+
         // Refresh in the background on open, but keep the previous list on
         // screen: clearing it would show "Searching…" for the whole scan, every
         // single time the menu is opened.
@@ -148,6 +155,7 @@ class GoCastIndicator extends PanelMenu.Button {
 
         this._rebuild();
         this._readVersion();
+        this._readAudioOutputs();
         this._scan();
     }
 
@@ -179,6 +187,7 @@ class GoCastIndicator extends PanelMenu.Button {
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         this.menu.addMenuItem(this._settings());
+        this.menu.addMenuItem(this._audioMenu());
         this.menu.addMenuItem(this._info());
 
         const again = new PopupMenu.PopupMenuItem(
@@ -273,6 +282,104 @@ class GoCastIndicator extends PanelMenu.Button {
         menu.menu.addMenuItem(debug);
 
         return menu;
+    }
+
+    /* _audioMenu chooses which output's sound is transmitted.
+     *
+     * At the top level and not inside Settings, where it belongs by meaning:
+     * gnome-shell does not support a PopupSubMenuMenuItem inside another one.
+     * A submenu nested in a submenu builds without complaint and then breaks
+     * the menu when it is opened.
+     *
+     * gocast transmits what one of the PC's outputs is playing, and by default
+     * that is whichever the system considers active. A laptop easily has five —
+     * a dock, the speakers, three HDMI ports — so a player sending its sound to
+     * one of the others produces a silent transmission with nothing anywhere to
+     * say why. Until this menu the only cure was a terminal. */
+    _audioMenu() {
+        const menu = new PopupMenu.PopupSubMenuMenuItem('Audio output');
+
+        // A dot rather than a switch: these are alternatives, only one at a
+        // time, and a row of switches would suggest they can be combined.
+        //
+        // The ornaments are moved by hand instead of rebuilding the menu, and
+        // activate is overridden so the item does not close it — the same
+        // reason the switches above do it. Whoever changes a setting usually
+        // changes another one right after, and a menu that shuts on every click
+        // makes that four trips through the panel.
+        const items = [];
+        const pick = (label, source) => {
+            const item = new PopupMenu.PopupMenuItem(label);
+            item.setOrnament(this._audioSource === source
+                ? PopupMenu.Ornament.DOT : PopupMenu.Ornament.NONE);
+            item.activate = () => {
+                this._audioSource = source;
+                for (const [other, src] of items)
+                    other.setOrnament(src === source
+                        ? PopupMenu.Ornament.DOT : PopupMenu.Ornament.NONE);
+            };
+            items.push([item, source]);
+            menu.menu.addMenuItem(item);
+        };
+
+        pick('Follow the active output', null);
+
+        if (this._audioOutputs === null) {
+            menu.menu.addMenuItem(this._inert('Reading…'));
+            return menu;
+        }
+        if (this._audioOutputs.length === 0) {
+            // Not an error: without a list the default still works, it simply
+            // cannot be chosen from.
+            menu.menu.addMenuItem(this._inert('No outputs found'));
+            return menu;
+        }
+
+        menu.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        for (const o of this._audioOutputs)
+            pick(o.default ? `${o.desc} (active)` : o.desc, o.monitor);
+
+        return menu;
+    }
+
+    /* _readAudioOutputs asks the binary, which asks GStreamer.
+     *
+     * Not pactl: on a PipeWire-only system it is not installed, which is the
+     * same reason the binary's default is the server-resolved magic name rather
+     * than one looked up by hand. A failure here is silent on purpose — the
+     * menu falls back to offering the default alone, and a notification about
+     * an audio listing nobody asked for would be noise. */
+    _readAudioOutputs() {
+        let proc;
+        try {
+            proc = this._launcher(
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
+            ).spawnv([BINARY, 'audio', '--json']);
+        } catch (e) {
+            this._audioOutputs = [];
+            return;
+        }
+
+        proc.communicate_utf8_async(null, null, (p, res) => {
+            let out = '';
+            try {
+                [, out] = p.communicate_utf8_finish(res);
+            } catch (e) {
+                this._audioOutputs = [];
+                return;
+            }
+            try {
+                const parsed = JSON.parse(out);
+                this._audioOutputs = Array.isArray(parsed) ? parsed : [];
+            } catch (e) {
+                this._audioOutputs = [];
+            }
+            // The reply outlives the indicator when the extension is disabled
+            // while the subprocess is still running, and rebuilding a menu that
+            // is already gone throws into the shell's own loop.
+            if (this.menu)
+                this._rebuild();
+        });
     }
 
     /* _info shows what is installed on each side.
@@ -441,6 +548,10 @@ class GoCastIndicator extends PanelMenu.Button {
             argv.push('--width', String(width));
         if (this._force)
             argv.push('--force');
+        // Only when chosen: with no flag the binary follows the active output,
+        // which is what most people want and what it does on its own.
+        if (this._audioSource)
+            argv.push('--audio-source', this._audioSource);
 
         try {
             this._proc = this._launcher(

@@ -210,6 +210,7 @@ Paired with raspberry. From now on you can transmit without retyping the code.
 | `--crop` | auto | `auto`, `WIDTHxHEIGHT[+X+Y]` or `no` |
 | `--source` | auto | what the picker offers: `auto`, `screen`, `window` |
 | `--audio` | true | transmit the PC audio as well |
+| `--audio-source` | the active output | which output's sound to transmit, see `gocast audio` |
 | `--force` | false | take over from another sender |
 | `--pin` | | access code, if the receiver asks for one |
 | `--stretch` | false | distort instead of letterboxing |
@@ -230,6 +231,37 @@ Paired with raspberry. From now on you can transmit without retyping the code.
 </details>
 
 ## How it works
+
+### Picking which output is transmitted
+
+gocast transmits what one of the PC's outputs is playing, captured through its
+monitor. By default that is whichever output the system considers active — and
+a laptop easily has five: a dock, the built-in speakers, three HDMI ports.
+
+When a player is sending its sound to one of the others, the transmission is
+silent and nothing says why. `gocast audio` lists them:
+
+```
+$ gocast audio
+ *  ThinkPad USB-C Dock Audio Stereo digitale (IEC958)
+    alsa_output.usb-Lenovo_ThinkPad_USB-C_Dock_Audio_000000000000-00.iec958-stereo.monitor
+
+    Raptor Lake-P/U/H cAVS Speaker
+    alsa_output.pci-0000_00_1f.3-platform-sof_sdw.HiFi__Speaker__sink.monitor
+```
+
+`*` is the one being transmitted now. To pick another, hand its monitor name to
+`--audio-source`. The sender also logs which output it settled on at startup,
+by the name a person recognises rather than the magic one.
+
+The GNOME extension offers the same list under **Settings → Audio output**,
+read once through `gocast audio --json`. "Follow the active output" is the
+default and passes no flag at all.
+
+The listing goes through `gst-device-monitor-1.0`, not `pactl`: on a
+PipeWire-only system pactl is not installed, which is the same reason the
+default is the server-resolved `@DEFAULT_MONITOR@` rather than a name we look
+up ourselves.
 
 ### Audio latency
 

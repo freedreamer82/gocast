@@ -40,6 +40,12 @@ func usage() {
         screen and is typed in here. Needed once per PC, and impossible
         while somebody is transmitting.
 
+  gocast audio
+        Lists this PC's audio outputs and the monitor name of each, to hand
+        to send --audio-source. The default transmits whatever the active
+        output is playing: when a player is sending its sound elsewhere the
+        transmission is silent, and this says which one to pick instead.
+
   gocast probe
         Diagnostic: counts the frames the screen source actually delivers,
         with no network and no encoder. Tells a portal that produces nothing
@@ -78,6 +84,8 @@ func main() {
 		err = discovery.List(ctx, os.Args[2:])
 	case "probe":
 		err = sender.Probe(ctx, os.Args[2:])
+	case "audio":
+		err = sender.Audio(ctx, os.Args[2:])
 	case "crop":
 		err = sender.Crop(ctx, os.Args[2:])
 	case "pair":

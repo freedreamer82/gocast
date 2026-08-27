@@ -423,7 +423,9 @@ func Send(ctx context.Context, args []string) error {
 	// division by zero. It is there for a receiver that cannot take 1080p.
 	width := fs.Int("width", 0, "maximum width transmitted, 0 to leave it alone")
 	audio := fs.Bool("audio", true, "transmit the PC audio as well")
-	audioSrc := fs.String("audio-source", "", "PulseAudio source (default: monitor of the active sink)")
+	audioSrc := fs.String("audio-source", "",
+		"which output to transmit the sound of, as a monitor source name; "+
+			"run `gocast audio` to list them (default: the active output)")
 	verbose := fs.Bool("verbose", false, "diagnostic: print the caps the pipeline negotiates")
 	keepalive := fs.Int("keepalive", 100,
 		"milliseconds between resends of the last frame on a still source (0 = off)")
@@ -587,7 +589,7 @@ func Send(ctx context.Context, args []string) error {
 		log.Printf("crop: %s (buffer %dx%d)", spec, cap.Width, cap.Height)
 	}
 	announceArea(spec, cap.Width, cap.Height, cap.Kind)
-	audioIn := resolveAudioIn(*audio, *audioSrc)
+	audioIn := resolveAudioIn(sendCtx, *audio, *audioSrc)
 
 	// The window can be resized mid-transmission, and the crop has to be redone.
 	// videocrop cannot be reconfigured while running, so we re-measure at
@@ -855,7 +857,13 @@ func senderPipeline(src, crop, host string, port, bitrate, fps, keyint int, pres
 
 // resolveAudioIn picks the audio source to capture, or an empty string when it
 // is not viable: without an AAC encoder there is nothing to send.
-func resolveAudioIn(enabled bool, src string) string {
+//
+// When the default is used it is resolved to a name a person recognises before
+// being logged. Echoing "@DEFAULT_MONITOR@" back says nothing, and this PC can
+// easily have five outputs — a dock, built-in speakers, three HDMI ports. If a
+// player is sending its sound to one of the others, the transmission carries
+// silence and the log gives no way to notice.
+func resolveAudioIn(ctx context.Context, enabled bool, src string) string {
 	if !enabled {
 		log.Print("audio: disabled on the command line")
 		return ""
@@ -864,9 +872,20 @@ func resolveAudioIn(enabled bool, src string) string {
 		log.Print("audio: no AAC encoder (install gstreamer1.0-libav), transmitting video only")
 		return ""
 	}
-	if src == "" {
-		src = defaultMonitor
+	if src != "" {
+		log.Printf("audio: %s via %s", src, aacEncoder())
+		return src
 	}
-	log.Printf("audio: %s via %s", src, aacEncoder())
-	return src
+
+	if outs, err := audioOutputs(ctx); err == nil {
+		if def, ok := defaultOutput(outs); ok {
+			log.Printf("audio: transmitting what %q is playing", def.Desc)
+			if len(outs) > 1 {
+				log.Printf("audio: %d other outputs on this PC — if the sound is "+
+					"missing, it is going to one of them: run `gocast audio`", len(outs)-1)
+			}
+		}
+	}
+	log.Printf("audio: %s via %s", defaultMonitor, aacEncoder())
+	return defaultMonitor
 }
