@@ -125,21 +125,22 @@ func SendHello(to net.IP, dataPort int, pin, token string) {
 
 // parseHello extracts code and token from an introduction.
 //
-// The code may be empty — an open receiver asks for none — so the fields are
-// counted rather than split and hoped for.
+// Split on position, not on whitespace. The code may be empty — `gocast pair`
+// introduces itself before it has one — and an empty middle field leaves two
+// spaces in a row, which Fields collapses: the receiver then read the token as
+// the code, denied an introduction that carried no code at all, and answered
+// with a token the sender could not recognise. Pairing could not complete at
+// all, and the log said "invalid code" for a message that held none.
 func parseHello(text string) (pin, token string, ok bool) {
 	if !strings.HasPrefix(text, MsgHello) {
 		return "", "", false
 	}
-	f := strings.Fields(strings.TrimPrefix(text, MsgHello))
-	switch len(f) {
-	case 0:
-		return "", "", true
-	case 1:
+	rest := strings.TrimPrefix(strings.TrimPrefix(text, MsgHello), " ")
+	f := strings.SplitN(rest, " ", 2)
+	if len(f) == 1 {
 		return f[0], "", true
-	default:
-		return f[0], f[1], true
 	}
+	return f[0], strings.TrimSpace(f[1]), true
 }
 
 // randomPIN generates a four-digit code.
@@ -349,6 +350,15 @@ func (a *Arbiter) startPairing(ctx context.Context, from net.IP, dataPort int) {
 func (a *Arbiter) greet(from net.IP, pin string, dataPort int) {
 	if !a.pairing {
 		return // open to anybody: there is nothing to check
+	}
+
+	// An introduction without a code is not a wrong code: it is how a sender
+	// announces itself before asking for one, so that the receiver knows which
+	// token to address its replies to. Answered with a denial, it is the denial
+	// that `gocast pair` reads as the receiver's first reply — and pairing dies
+	// before the code has even reached the screen.
+	if pin == "" {
+		return
 	}
 
 	a.mu.Lock()

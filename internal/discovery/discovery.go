@@ -250,35 +250,45 @@ func browse(ctx context.Context, timeout time.Duration) ([]Receiver, error) {
 		}
 		seen[key] = true
 
-		pairing, id, maxw, maxh := false, "", 0, 0
-		ver := ""
-		var modes []media.Rect
-		for _, t := range e.Text {
-			switch {
-			case strings.HasPrefix(t, txtPairing):
-				pairing = strings.TrimPrefix(t, txtPairing) == "1"
-			case strings.HasPrefix(t, txtID):
-				id = strings.TrimPrefix(t, txtID)
-			case strings.HasPrefix(t, txtMaxHeight):
-				maxh, _ = strconv.Atoi(strings.TrimPrefix(t, txtMaxHeight))
-			case strings.HasPrefix(t, txtVersion):
-				ver = strings.TrimPrefix(t, txtVersion)
-			case strings.HasPrefix(t, txtModes):
-				modes = decodeModes(strings.TrimPrefix(t, txtModes))
-			case strings.HasPrefix(t, txtMaxWidth):
-				maxw, _ = strconv.Atoi(strings.TrimPrefix(t, txtMaxWidth))
-			}
-		}
-
-		r := Receiver{
-			Name: e.Instance, Host: host, Port: e.Port,
-			ID: id, Pairing: pairing, MaxWidth: maxw, MaxHeight: maxh, Modes: modes,
-			Version: ver,
-		}
-		out = append(out, r)
+		out = append(out, receiverFrom(e.Instance, host, e.Port, e.Text))
 	}
 	return out, nil
 }
+
+// receiverFrom reads an announcement into a receiver.
+//
+// Everything here comes off the wire except one field: whether we have paired.
+// That one is ours to answer — the receiver announces that it wants a code, and
+// only this machine knows whether it holds one. Left unanswered, which it was,
+// a receiver already paired went on being reported as needing pairing: the
+// extension kept offering "pair first", and the sender refused to transmit to
+// it without the code being typed out again on the command line.
+func receiverFrom(name, host string, port int, txt []string) Receiver {
+	r := Receiver{Name: name, Host: host, Port: port}
+	for _, t := range txt {
+		switch {
+		case strings.HasPrefix(t, txtPairing):
+			r.Pairing = strings.TrimPrefix(t, txtPairing) == "1"
+		case strings.HasPrefix(t, txtID):
+			r.ID = strings.TrimPrefix(t, txtID)
+		case strings.HasPrefix(t, txtMaxHeight):
+			r.MaxHeight, _ = strconv.Atoi(strings.TrimPrefix(t, txtMaxHeight))
+		case strings.HasPrefix(t, txtVersion):
+			r.Version = strings.TrimPrefix(t, txtVersion)
+		case strings.HasPrefix(t, txtModes):
+			r.Modes = decodeModes(strings.TrimPrefix(t, txtModes))
+		case strings.HasPrefix(t, txtMaxWidth):
+			r.MaxWidth, _ = strconv.Atoi(strings.TrimPrefix(t, txtMaxWidth))
+		}
+	}
+	// The identity is read before this line is reached, and it is what the code
+	// is filed under: the order matters.
+	r.Paired = r.paired()
+	return r
+}
+
+// paired reports whether this machine holds a code for the receiver.
+func (r Receiver) paired() bool { return control.RecallPin(r.Key()) != "" }
 
 // Key is the name under which the sender remembers this receiver's code.
 //

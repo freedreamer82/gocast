@@ -1,8 +1,14 @@
 package receiver
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"gocast/internal/media"
 )
 
 // The fallback must step down one configuration at a time and stop at the end,
@@ -142,4 +148,105 @@ func TestAudioLatencyGovernsQueueAndRingTogether(t *testing.T) {
 			t.Errorf("the 400 ms budget does not produce %q:\n%s", want, desc)
 		}
 	}
+}
+
+// The pairing code is a caption over the idle screen, not a screen of its own:
+// tearing the picture down and putting it back up blinks the television and
+// changes its mode, twice, to show four digits.
+func TestIdleScreenCaptions(t *testing.T) {
+	s := &idleScreen{sink: "kmssink", frame: media.Rect{W: 1920, H: 1080},
+		image: "/tmp/idle.png"}
+
+	desc := s.desc(true)
+	for _, want := range []string{
+		"textoverlay name=cap",  // the overlay the caption lands on
+		"wait-text=false",       // or the picture stops until something is said
+		"fdsrc fd=3 ! subparse", // the pipe the cues travel down
+		"cap.text_sink",
+	} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("a captioned idle screen is missing %q:\n%s", want, desc)
+		}
+	}
+	if got := s.desc(false); strings.Contains(got, "fdsrc") {
+		t.Errorf("without a pipe there must be nothing to read from:\n%s", got)
+	}
+
+	// Nothing on screen: the caller has to be told, so that it can light a screen
+	// of its own rather than believe the code is up.
+	if s.caption("Pairing code: 1234") {
+		t.Error("a screen that is down must not claim to have shown the code")
+	}
+	// Remembered even so, and cleared on the way out: a code that outlives its
+	// screen has to come back with it, and a spent one must not.
+	if s.text != "Pairing code: 1234" {
+		t.Errorf("the caption was not remembered: %q", s.text)
+	}
+	s.caption("")
+	if s.text != "" {
+		t.Errorf("the caption was not cleared: %q", s.text)
+	}
+}
+
+// The caption is written as subtitle cues, and a malformed one is not rejected
+// by anything: subparse simply drops it, and the code never appears.
+func TestCueFormat(t *testing.T) {
+	got := cue(7, 3661*time.Second+250*time.Millisecond, "Pairing code: 2040")
+	want := "7\n01:01:01,250 --> 01:01:02,250\nPairing code: 2040\n\n"
+	if got != want {
+		t.Errorf("cue:\n%q\nwant:\n%q", got, want)
+	}
+	// The blank line at the end is what closes a cue: without it subparse waits
+	// for the rest of a subtitle that never comes.
+	if !strings.HasSuffix(got, "\n\n") {
+		t.Error("a cue must end with a blank line")
+	}
+}
+
+// A GStreamer that will not arrange the captions must still paint the picture.
+// A television left showing the console because a caption could not be had is a
+// far worse failure than a pairing code that takes the screen over, and it is
+// the kind of difference that only appears on somebody else's installation.
+func TestIdleScreenFallsBackWithoutCaptions(t *testing.T) {
+	dir := t.TempDir()
+	ran := filepath.Join(dir, "ran")
+	// A gst-launch that refuses anything to do with subtitles, and records what
+	// it was asked to run.
+	stub := "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in *subparse*) exit 1;; esac; done\n" +
+		"echo \"$@\" >> " + ran + "\nexec sleep 30\n"
+	if err := os.WriteFile(filepath.Join(dir, "gst-launch-1.0"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "gst-inspect-1.0"),
+		[]byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Ahead of the real one, not instead of it: the stub still needs a shell and
+	// a sleep to stay alive the way a pipeline does.
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	s := &idleScreen{sink: "kmssink", frame: media.Rect{W: 1920, H: 1080},
+		image: "/tmp/idle.png"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer s.hide()
+
+	s.show(ctx)
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		out, err := os.ReadFile(ran)
+		if err != nil || !strings.Contains(string(out), "kmssink") {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		if strings.Contains(string(out), "subparse") {
+			t.Fatalf("the pipeline that ran still carries the captions:\n%s", out)
+		}
+		// And the caller has to be told, or it would believe a code written into
+		// a pipe nobody reads is up on the screen.
+		if s.caption("Pairing code: 1234") {
+			t.Error("a screen with no captions must not claim to have shown the code")
+		}
+		return
+	}
+	t.Fatal("the idle screen never went back up without captions")
 }

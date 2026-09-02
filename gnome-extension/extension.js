@@ -69,7 +69,10 @@ const FALLBACK_WIDTHS = [1920, 1280, 960, 640];
  */
 const PairDialog = GObject.registerClass(
 class PairDialog extends ModalDialog.ModalDialog {
-    _init(receiverName, onSubmit) {
+    /* onDone is called exactly once, with null when the dialog is dismissed
+     * without a code: the process on the other side is blocked reading standard
+     * input, and it has to be told that nothing is coming. */
+    _init(receiverName, onDone) {
         super._init({styleClass: 'prompt-dialog'});
 
         const box = new St.BoxLayout({
@@ -97,7 +100,10 @@ class PairDialog extends ModalDialog.ModalDialog {
             {
                 label: 'Cancel',
                 key: Clutter.KEY_Escape,
-                action: () => this.close(),
+                action: () => {
+                    this.close();
+                    onDone(null);
+                },
             },
             {
                 label: 'Pair',
@@ -105,8 +111,7 @@ class PairDialog extends ModalDialog.ModalDialog {
                 action: () => {
                     const code = this._entry.get_text().trim();
                     this.close();
-                    if (code)
-                        onSubmit(code);
+                    onDone(code || null);
                 },
             },
         ]);
@@ -507,7 +512,14 @@ class GoCastIndicator extends PanelMenu.Button {
 
     /* Pairing runs the binary, which asks the receiver to show a code, then
      * reads the code from its standard input — which is what the dialog feeds
-     * it. */
+     * it.
+     *
+     * Not communicate_utf8_async: given no input to write, it closes standard
+     * input straight away, and it does so before anybody has had time to read a
+     * code off the television. The process then finds its input already at end
+     * of file, gives up with "no code typed", and whatever the dialog writes
+     * afterwards goes into a pipe nobody is holding. So the pipe is fed by hand
+     * and the exit status awaited on its own. */
     _pair(r) {
         let proc;
         try {
@@ -519,25 +531,60 @@ class GoCastIndicator extends PanelMenu.Button {
             return;
         }
 
-        new PairDialog(r.Name, code => {
-            proc.get_stdin_pipe().write_all(`${code}\n`, null);
-        }).open();
-
-        proc.communicate_utf8_async(null, null, (p, res) => {
-            let stderr = '';
+        /* Closing is not optional, and not only on success: `gocast pair` blocks
+         * on a line of input, so a cancelled dialog that left the pipe open
+         * would leave the process waiting for a code forever. */
+        const feed = code => {
             try {
-                [, , stderr] = p.communicate_utf8_finish(res);
+                const stdin = proc.get_stdin_pipe();
+                if (code)
+                    stdin.write_all(`${code}\n`, null);
+                stdin.close(null);
             } catch (e) {
-                // Only the exit status matters; stderr is a bonus.
+                this._fail('Could not hand the code to the pairing process', e);
+            }
+        };
+
+        new PairDialog(r.Name, feed).open();
+
+        proc.wait_async(null, (p, res) => {
+            try {
+                p.wait_finish(res);
+            } catch (e) {
+                this._fail('Pairing did not finish', e);
+                return;
             }
             if (p.get_successful()) {
                 Main.notify('GoCast', `Paired with ${r.Name}.`);
                 this._scan(); // the entry becomes a resolution submenu
-            } else {
-                Main.notifyError('GoCast',
-                    this._errorLine(stderr) || `Pairing with ${r.Name} failed`);
+                return;
             }
+            /* Read once the process is gone: its diagnosis is a couple of lines,
+             * so it is already sitting in the pipe buffer and nothing can
+             * block. */
+            Main.notifyError('GoCast',
+                this._errorLine(this._drain(p.get_stderr_pipe())) ||
+                `Pairing with ${r.Name} failed`);
         });
+    }
+
+    /* Everything left in a pipe whose writer has finished. */
+    _drain(stream) {
+        if (!stream)
+            return '';
+        let text = '';
+        try {
+            const reader = new Gio.DataInputStream({base_stream: stream});
+            for (;;) {
+                const [line] = reader.read_line_utf8(null);
+                if (line === null)
+                    break;
+                text += `${line}\n`;
+            }
+        } catch (e) {
+            // The diagnosis is a bonus: the exit status is what decides.
+        }
+        return text;
     }
 
     _start(r, width) {

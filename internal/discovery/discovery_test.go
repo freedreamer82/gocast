@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"gocast/internal/control"
 	"gocast/internal/media"
 )
 
@@ -62,5 +63,49 @@ func TestEncodeModesDropsEmpty(t *testing.T) {
 	}
 	if got := encodeModes(nil); got != "" {
 		t.Fatalf("encodeModes(nil) = %q, want empty", got)
+	}
+}
+
+// Whether we have paired is not something the receiver can tell us: it
+// announces that it wants a code, and only this machine knows whether it holds
+// one. Nothing filled the answer in, so a receiver already paired went on being
+// reported as needing pairing — the extension kept offering "pair first" and
+// the sender refused to transmit to it at all.
+func TestPairedIsAnsweredHere(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	r := Receiver{Name: "tv", Host: "192.168.1.9", Port: 5000,
+		ID: "8e36a12f01f68890", Pairing: true}
+	if r.paired() {
+		t.Error("with no code stored, a receiver cannot be reported as paired")
+	}
+	if got := pairingState(r); got != "pairing needed (gocast pair)" {
+		t.Errorf("unpaired receiver reported as %q", got)
+	}
+
+	if err := control.RememberPin(r.Key(), "2040"); err != nil {
+		t.Fatalf("the code could not be stored: %v", err)
+	}
+
+	// Read back out of an announcement, the way the extension and the sender get
+	// it: the answer has to be filled in there, not left to each caller.
+	r = receiverFrom("tv", "192.168.1.9", 5000,
+		[]string{"pairing=1", "id=8e36a12f01f68890", "maxw=1920", "maxh=1080"})
+	if !r.Paired {
+		t.Fatal("an announcement from a receiver whose code we hold must come back paired")
+	}
+	if !r.Pairing || r.MaxWidth != 1920 {
+		t.Errorf("the rest of the announcement was lost: %+v", r)
+	}
+	if got := pairingState(r); got != "paired" {
+		t.Errorf("paired receiver reported as %q", got)
+	}
+
+	// The code is filed under the announced identity and not the address, so a
+	// receiver that moves under DHCP must not have to be paired again.
+	moved := r
+	moved.Host = "192.168.1.44"
+	if !moved.paired() {
+		t.Error("pairing must survive a change of address")
 	}
 }

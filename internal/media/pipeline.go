@@ -299,7 +299,16 @@ func pickSink() string {
 		// without this line the choice looks arbitrary.
 		log.Printf("%s is not usable on this machine, trying the next one", sink)
 	}
-	log.Print("no usable video sink: the picture cannot be shown")
+	// Not just "it failed": every sink here failing at once is a symptom with one
+	// usual cause, and naming it costs a line. A pipeline orphaned by a previous
+	// run keeps the DRM device — it outlives its parent whenever that is killed
+	// outright rather than asked to stop — and from then on nothing else can set
+	// a mode. Without this the receiver goes on to listen, accept, decode, and
+	// throw every frame away into fakesink, reporting nothing wrong.
+	log.Print("no usable video sink: the picture cannot be shown. Every candidate " +
+		"failing at once usually means the display is already held by somebody " +
+		"else, and a pipeline orphaned by an earlier run is the usual culprit:\n" +
+		"  pgrep -a gst-launch   # then kill what it finds and start again")
 	return "fakesink"
 }
 

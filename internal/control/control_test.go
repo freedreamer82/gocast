@@ -258,7 +258,15 @@ func TestRandomPIN(t *testing.T) {
 
 func TestParseHello(t *testing.T) {
 	t.Run("code and token", func(t *testing.T) {
-		pin, tok, ok := parseHello(MsgHello + " 4821 abc123")
+		// The code is empty here, and the field is still there: two spaces in a
+		// row, which is what an introduction made before there is any code to
+		// give looks like on the wire.
+		pin, tok, ok := parseHello(MsgHello + "  abc123")
+		if !ok || pin != "" || tok != "abc123" {
+			t.Errorf("introduction without a code: pin %q, token %q, ok %v", pin, tok, ok)
+		}
+
+		pin, tok, ok = parseHello(MsgHello + " 4821 abc123")
 		if !ok || pin != "4821" || tok != "abc123" {
 			t.Errorf("want 4821/abc123, got %q/%q (ok=%v)", pin, tok, ok)
 		}
@@ -320,5 +328,36 @@ func TestControlSurvivesBusyPort(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("WaitForStop did not give up on a busy port")
+	}
+}
+
+// A sender introduces itself before asking for a code, so the receiver learns
+// which token to answer. Denying that introduction used to break pairing
+// outright: `gocast pair` acts on the first reply it gets, and a denial in front
+// of the "code shown" notice made it give up before the code had even reached
+// the screen.
+func TestCodelessIntroductionIsNotDenied(t *testing.T) {
+	port := freePort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	replies := make(chan Msg, 4)
+	go ListenControl(ctx, "sender", SendControlPort(port), replies)
+	time.Sleep(100 * time.Millisecond) // the socket has to exist before we ask
+
+	ip := net.IPv4(127, 0, 0, 1)
+	a := paired(t, "1234", time.Minute)
+	a.greet(ip, "", port)
+
+	select {
+	case m := <-replies:
+		t.Fatalf("an introduction without a code was answered with %q", m.Text)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// And the code is still on screen, waiting to be typed.
+	a.greet(ip, "1234", port)
+	if !a.Allowed(ip) {
+		t.Error("the code on screen must still pair after an introduction")
 	}
 }

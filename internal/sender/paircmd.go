@@ -86,12 +86,16 @@ func Pair(ctx context.Context, args []string) error {
 	}
 
 	fmt.Print("Code shown on the receiver's screen. Type it here: ")
+	// The error is judged on what came in, not on its own: standard input closing
+	// without a newline still hands over the code typed before it, and from the
+	// extension — where the dialog closes the pipe as it goes — that is the normal
+	// case rather than a failure.
 	code, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil {
-		return err
-	}
 	code = strings.TrimSpace(code)
 	if code == "" {
+		if err != nil {
+			return errors.New("pairing cancelled: no code was typed")
+		}
 		return errors.New("no code typed")
 	}
 

@@ -460,9 +460,10 @@ func Serve(ctx context.Context, args []string) error {
 
 	if chain.ff != nil {
 		log.Printf("listening on TCP %d — %s", *port, chain.describe())
-		screen := &pairScreen{sink: *sink, ctx: ctx}
-		arb := control.NewArbiter(ctx, *port, *pairing, *pairWindow, screen.show, screen.hide)
-		return serveStreamTCP(ctx, *port, chain, *verbose || *stats, arb, idle)
+		screen := &pairScreen{sink: *sink, frame: idle.frame, image: idle.image, ctx: ctx, idle: idle}
+		arb := control.NewArbiter(ctx, *port, *pairing, *pairWindow,
+			screen.show, func() { screen.hide(); idle.show(ctx) })
+		return serveStreamTCP(ctx, *port, chain, *verbose || *stats, arb, idle, screen)
 	}
 
 	desc := chain.desc()
@@ -491,10 +492,13 @@ func Serve(ctx context.Context, args []string) error {
 
 	// The pairing code is shown on the very screen that will host the content,
 	// and that is the point: whoever cannot see it cannot pair.
-	screen := &pairScreen{sink: *sink, ctx: ctx}
-	arb := control.NewArbiter(ctx, *port, *pairing, *pairWindow, screen.show, screen.hide)
+	// The code displaces the idle screen and the idle screen comes back after it:
+	// one sink, one display, so the two can never be lit at the same time.
+	screen := &pairScreen{sink: *sink, frame: idle.frame, image: idle.image, ctx: ctx, idle: idle}
+	arb := control.NewArbiter(ctx, *port, *pairing, *pairWindow,
+		screen.show, func() { screen.hide(); idle.show(ctx) })
 
-	return serveStreamTCP(ctx, *port, chain, *verbose || *stats, arb, idle)
+	return serveStreamTCP(ctx, *port, chain, *verbose || *stats, arb, idle, screen)
 }
 
 // announcedName is the name shown on the idle screen: the same one the receiver

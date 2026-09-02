@@ -24,8 +24,11 @@ import (
 // transmission, stated by the protocol. With UDP the end had to be guessed from
 // prolonged silence, and the in-flight datagrams of a sender that had just been
 // dismissed would reopen the session by themselves.
+// pair is taken alongside idle because the display has one owner: a code left
+// on screen when an already-paired sender starts transmitting would keep the
+// DRM device, and playback would set no mode and draw nothing.
 func serveStreamTCP(ctx context.Context, port int, chain *playbackChain,
-	verbose bool, arb *control.Arbiter, idle *idleScreen) error {
+	verbose bool, arb *control.Arbiter, idle *idleScreen, pair *pairScreen) error {
 
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -81,8 +84,10 @@ func serveStreamTCP(ctx context.Context, port int, chain *playbackChain,
 		log.Printf("stream arriving from %s", ip)
 
 		// The idle screen holds the sink, and therefore the display: it has to be
-		// gone before playback starts, not merely asked to go.
+		// gone before playback starts, not merely asked to go. The same goes for a
+		// pairing code still counting down its window.
 		idle.hide()
+		pair.hide()
 		arb.Busy.Store(true)
 		runCtx, cancel := context.WithCancel(ctx)
 
