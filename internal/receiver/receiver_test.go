@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"gocast/internal/media"
+	"gocast/internal/version"
 )
 
 // The fallback must step down one configuration at a time and stop at the end,
@@ -249,4 +250,51 @@ func TestIdleScreenFallsBackWithoutCaptions(t *testing.T) {
 		return
 	}
 	t.Fatal("the idle screen never went back up without captions")
+}
+
+// The captioning overlay must come before every other overlay in the pipeline.
+//
+// With one in front of it the words fed through its text pad are never
+// rendered — measured frame by frame, on both the picture and the splash — and
+// nothing says so: the pipeline runs, the pairing code is written into it, and
+// the screen simply never shows it. That is why the order is asserted here
+// rather than left to whoever next adds a line to a corner of the screen.
+func TestCaptionOverlayComesFirst(t *testing.T) {
+	for _, tc := range []struct{ name, image string }{
+		{"over a picture", "/tmp/idle.png"},
+		{"over the splash", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &idleScreen{sink: "kmssink", frame: media.Rect{W: 1920, H: 1080},
+				image: tc.image, name: "raspcast"}
+			desc := s.desc(true)
+
+			cap := strings.Index(desc, "textoverlay name=cap")
+			if cap < 0 {
+				t.Fatalf("no captioning overlay at all:\n%s", desc)
+			}
+			// Every other overlay carries its text as a property.
+			if other := strings.Index(desc, "textoverlay text="); other >= 0 && other < cap {
+				t.Errorf("an overlay comes before the captioning one, "+
+					"which stops the pairing code from ever being drawn:\n%s", desc)
+			}
+		})
+	}
+}
+
+// The version on screen answers "which binary is actually running on that
+// Raspberry", a question that otherwise costs an ssh session and a guess at a
+// file's timestamp.
+func TestIdleScreenShowsWhatItIs(t *testing.T) {
+	s := &idleScreen{sink: "kmssink", frame: media.Rect{W: 1920, H: 1080},
+		image: "/tmp/idle.png"}
+	desc := s.desc(false)
+	if !strings.Contains(desc, "gocast "+version.String()) {
+		t.Errorf("the version is not on the idle screen:\n%s", desc)
+	}
+	// Out of the way: bottom right, and small enough not to compete with the
+	// picture it sits on.
+	if !strings.Contains(desc, "valignment=bottom halignment=right") {
+		t.Errorf("the stamp is not in the corner:\n%s", desc)
+	}
 }

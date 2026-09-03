@@ -62,6 +62,11 @@ func serveStreamTCP(ctx context.Context, port int, chain *playbackChain,
 		}
 	}()
 
+	// Cleared before anything is drawn, and cleared once: every handover between
+	// the idle screen and playback shows the console for a moment, and a console
+	// with nothing on it is a black moment rather than a login prompt.
+	blankConsole()
+
 	// Something on the screen while waiting: without it the TV shows the console,
 	// and a receiver that is ready looks exactly like one that has crashed.
 	idle.show(ctx)
@@ -86,6 +91,11 @@ func serveStreamTCP(ctx context.Context, port int, chain *playbackChain,
 		// The idle screen holds the sink, and therefore the display: it has to be
 		// gone before playback starts, not merely asked to go. The same goes for a
 		// pairing code still counting down its window.
+		//
+		// Again before the handover, not only at startup: the kernel writes to the
+		// console while we are not looking — a link going up, a USB device, an OOM
+		// — and whatever it wrote would be what the television shows in the gap.
+		blankConsole()
 		idle.hide()
 		pair.hide()
 		arb.Busy.Store(true)

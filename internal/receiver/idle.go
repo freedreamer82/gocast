@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"gocast/internal/media"
+	"gocast/internal/version"
 )
 
 // idleScreen is what the TV shows while nobody is transmitting.
@@ -76,6 +77,25 @@ func (s *idleScreen) desc(captioned bool) string {
 		w, h = 1920, 1080
 	}
 
+	// Which binary is actually running on that Raspberry, readable from the sofa:
+	// the receiver announces its version over mDNS, but the announcement is no
+	// help when the question is why the thing in front of you behaves like an
+	// older one. Small, in the corner, out of the way of everything else.
+	stamp := "gocast " + version.String()
+	// Small: it is there to be read when somebody goes looking for it, not to
+	// share the screen with the picture.
+	font := h / 90
+	if font < 8 {
+		font = 8
+	}
+	build := fmt.Sprintf("textoverlay text=%q font-desc=\"Sans %d\" "+
+		"valignment=bottom halignment=right xpad=%d ypad=%d ! ",
+		stamp, font, h/40, h/40)
+
+	// The captioning overlay goes first, before any other, and that is not a
+	// matter of taste: measured, a textoverlay placed in front of it stops the
+	// words fed through its text pad from ever being rendered. Both the name on
+	// the splash and the build stamp are such overlays, so both go behind it.
 	caption, feed := "", ""
 	if captioned {
 		caption = fmt.Sprintf("textoverlay name=cap wait-text=false "+
@@ -91,8 +111,8 @@ func (s *idleScreen) desc(captioned bool) string {
 			"-q filesrc location=%q ! decodebin ! imagefreeze "+
 				"! videoconvert ! videoscale add-borders=true "+
 				"! video/x-raw,format=I420,width=%d,height=%d,framerate=1/1 "+
-				"! %s%s sync=true%s",
-			s.image, w, h, caption, s.sink, feed)
+				"! %s%s%s sync=true%s",
+			s.image, w, h, caption, build, s.sink, feed)
 	}
 
 	// Two overlays on the splash, not one: the name is a fixed property of the
@@ -101,10 +121,10 @@ func (s *idleScreen) desc(captioned bool) string {
 	return fmt.Sprintf(
 		"-q videotestsrc is-live=true pattern=solid-color foreground-color=0xff10243f "+
 			"! video/x-raw,width=%d,height=%d,framerate=1/1 "+
-			"! textoverlay text=%q font-desc=\"Sans Bold 40\" "+
+			"! %stextoverlay text=%q font-desc=\"Sans Bold 40\" "+
 			"valignment=center halignment=center "+
 			"! %svideoconvert ! %s sync=true%s",
-		w, h, "gocast · "+s.name+" · ready", caption, s.sink, feed)
+		w, h, caption, "gocast · "+s.name+" · ready", build, s.sink, feed)
 }
 
 // caption writes a line over the picture, leaving the picture alone.
